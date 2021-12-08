@@ -1,4 +1,10 @@
 <template>
+  <div class="q-pa-md q-gutter-sm" v-if="synced == false">
+    <q-banner inline-actions rounded class="text-white">
+      <q-icon name="warning" class="text-red" style="font-size: 1.2rem;" />
+      indexing in progress, data is not 100% accurate.
+    </q-banner>
+  </div>
   <q-page>
     <h4>
       <q-avatar>
@@ -127,6 +133,7 @@
 import { defineComponent } from "vue"
 
 import poolquery from "../queries/pool_detail.gql"
+import statequery from '../queries/state.gql'
 import { client } from "../services/graphql"
 import { get_token } from '../services/tokens'
 import numeral from "numeral";
@@ -292,12 +299,64 @@ export default defineComponent({
     }
   },
   async setup(props) {
+    let synced = true;
+    try {
+      let state = await client.request(statequery);
+      let timeDiff = (+new Date()/1000) - state.status.last_blockTime;
+      if(state.status.state !== "OK" || timeDiff > 600) {
+        synced = false
+      }
+    } catch(e) {
+      console.log(e)
+    }
+    const squash_ts_to = (d, timeframe) => {
+      let ms = 1000 * 60 * timeframe;
+      let roundedDate = new Date(Math.ceil(d.getTime() / ms) * ms); // close time
+      return roundedDate.toISOString();
+    }
+
     let result = await client.request(poolquery, {
       address: props.address,
     });
+
+    const squashTimeframe = (
+      result.pool_hourly_data.length > 20
+      && (
+        squash_ts_to(new Date(result.pool_hourly_data[0].time), 15) != result.pool_hourly_data[0].time
+          || squash_ts_to(new Date(result.pool_hourly_data[1].time), 15) != result.pool_hourly_data[1].time
+          || squash_ts_to(new Date(result.pool_hourly_data[2].time), 15) != result.pool_hourly_data[2].time
+      )
+    ) ? true : false;
+    // if timeframe less than 15min
+    if(squashTimeframe) {
+      const history = {};
+      // Aggregate data to each 15min if needed
+      result.pool_hourly_data.map((current, index, arrRef) => {
+		    const time = squash_ts_to(new Date(current.time), 15)
+        if(history[time]) {
+          history[time].index = index
+          history[time].time = time
+          history[time].usd_price = current.usd_price;
+          history[time].tvl_coin += current.tvl_coin;
+          history[time].tvl_pc += current.tvl_pc;
+          history[time].tvl_usd += current.tvl_usd;
+          history[time].volume += current.volume;
+          if(current.time > arrRef[history[time].index].time) {
+            history[time].price = current.price;
+          }
+        } else {
+          history[time] = current
+          history[time].index = index
+        }
+      })
+      result.pool_hourly_data = Object.values(history)
+    }
+
+
     result.pool.coin = get_token(result.pool.coin.address, result.pool.coin)
     result.pool.pc = get_token(result.pool.pc.address, result.pool.pc)
     return {
+      synced: synced,
       numeral,
       ...result,
     };
